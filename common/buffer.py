@@ -16,6 +16,7 @@ class Trajectory:
         self.actions = []
         self.log_probs = []          # 每一个时隙输出的动作概率的对数值（后续梯度下降计算用）
         self.rewards = []           # 存每一个时隙的reward，但仅最后一步非零
+        self.traj_reward = None
 
     def add(self, state, action, log_prob, reward):    # 每一个时隙的信息添加
         self.states.append(state)
@@ -32,10 +33,13 @@ class Trajectory:
             returns.insert(0, R)
         return returns
 
-    def trajectory_reward(self):
-        if len(self.rewards) < 1:
-            raise ValueError("该轨迹无记录，len(rewards)=0")
-        return self.rewards[-1]
+    def compute_trajectory_reward(self, no_cmp_penalty=None):
+        if no_cmp_penalty == None:
+            assert self.rewards[-1] != 0, "标记is_computed的车辆没有计算reward（reward=0）"
+            self.traj_reward = self.rewards[-1]
+        else:
+            assert sum(self.rewards) == 0, "未标记is_computed的车辆有非零reward"
+            self.traj_reward = - no_cmp_penalty
 
     def length(self):
         return len(self.states)
@@ -43,10 +47,11 @@ class Trajectory:
 
 
 
+
 class TrajectoryBuffer:
     def __init__(self, capacity):
-        self.capacity = capacity
-        self.buffer = deque(maxlen=capacity)
+        self.capacity = int(capacity)
+        self.buffer = deque(maxlen=self.capacity)
 
     def store_a_traj(self, traj):
         self.buffer.append(traj)
@@ -57,7 +62,7 @@ class TrajectoryBuffer:
         return random.sample(self.buffer, batch_size)
 
     def all_traj_rewards(self):
-        return [traj.trajectory_reward() for traj in self.buffer]
+        return [traj.traj_reward for traj in self.buffer]
 
     def ready(self, batch_size=20):  # 判断当前收集的样本个数是否足够一个batch
         if len(self.buffer) >= batch_size:
@@ -68,6 +73,7 @@ class TrajectoryBuffer:
     def clear(self):
         self.buffer.clear()
 
-
+    def get_length(self):
+        return len(self.buffer)
 
 

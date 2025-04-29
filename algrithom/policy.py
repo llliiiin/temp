@@ -35,6 +35,14 @@ class REINFORCE:
         # 利用梯度下降更新参数
         self.optimizer.zero_grad()
         loss.backward()
+
+        # total_norm = 0
+        # for p in self.actor.parameters():
+        #     if p.grad is not None:
+        #         total_norm += p.grad.data.norm(2).item() ** 2
+        # total_norm = total_norm ** 0.5
+        # print(f"Grad norm before clip: {total_norm:.4f}")
+
         torch.nn.utils.clip_grad_norm_(self.actor.parameters(), self.grad_norm_clip)  # 防止梯度爆炸
         self.optimizer.step()
 
@@ -67,6 +75,8 @@ def compute_policy_gradient_loss(trajs, mean=None, std=None, subsample_ratio=Non
     std = std + 1e-8                    # 防止除零
     norm_rewards = (traj_rewards - mean) / std          # shape: (N_traj,)
 
+
+
     # -------- 计算损失 --------
     losses = []
     for traj, R_norm in zip(trajs, norm_rewards):
@@ -79,5 +89,5 @@ def compute_policy_gradient_loss(trajs, mean=None, std=None, subsample_ratio=Non
             idx = range(T)
             weight = 1.0
         for i in idx:
-            losses.append(-traj.log_probs[i] * (R_norm * weight))
+            losses.append(-traj.log_probs[i] * (R_norm * weight))   #-tr
     return torch.stack(losses).mean()

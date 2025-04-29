@@ -18,6 +18,12 @@ class I2Vchannel:
         self.shadow_std = 8                             # 8
         self.noise_power = noise_power                  # 噪声功率（dBm）
 
+    def get_distance(self, position, position_orth):
+        d1 = abs(position - self.RSU_position[0])
+        d2 = abs(position_orth - self.RSU_position[1])
+        distance = math.hypot(d1, d2)
+        return distance
+
     def get_path_loss(self, position, position_orth):
         d1 = abs(position - self.RSU_position[0])
         d2 = abs(position_orth - self.RSU_position[1])
@@ -31,7 +37,8 @@ class I2Vchannel:
 
     def get_channel_gain(self, position, position_orth, delta_distance, previous_shadowing):
         path_loss = self.get_path_loss(position, position_orth)      # 计算路径损耗（单位：dB）
-        shadow = self.get_shadowing(delta_distance, previous_shadowing)     # 计算阴影衰落（单位：dB）
+        # shadow = self.get_shadowing(delta_distance, previous_shadowing)     # 计算阴影衰落（单位：dB）
+        shadow = 0
         P_received_dBm = self.RSU_trans_power - (path_loss + shadow)        # 单位：dBm
         # 计算信道增益
         channel_gain_dB = P_received_dBm - self.noise_power     # 单位：dB
@@ -68,7 +75,8 @@ class Vehicle:
         self.is_computed = False
         self.is_left = False
         self.trans_rate = None
-        self.shadowing = np.random.normal(0, self.I2V_channel.shadow_std)
+        # self.shadowing = np.random.normal(0, self.I2V_channel.shadow_std)
+        self.shadowing = 0
         self.traj = Trajectory()
 
     def compute_step_reward(self, args):
@@ -76,15 +84,17 @@ class Vehicle:
 
         FF = self.time_remained * self.f / args.G0          # f和G0的单位都是 G级别
         F = max([x for x in args.diff_step_set if x <= FF], default=min(args.diff_step_set))  # 选择扩散步数
-        # print('选择的扩散步数: ', F)
+        # print('F: ', F)
         comp_delay = args.G0 * F / self.f                  # 实际计算时延
 
         received_frame_num = int(self.received_data / (args.frame_size * 1024 * 8 * self.code_rate))
         prediction_error = calculate_prediction_error(received_frame_num, self.anytime_alpha, self.time_remained, F, args.time_slot)
 
-        received_dataa = self.received_data / 8 / 1024
+        received_dataa = self.received_data / 8 / 1024 / args.frame_size / 2.7
+        # prediction_error = prediction_error * 3.3 * 1.5
 
         reward = - (prediction_error + args.lamda * received_dataa) - args.r_T * max(comp_delay - self.time_remained, 0)   # 0.5x -- 1.xx
+        # reward = np.sign(reward) * (np.abs(reward)**0.5) * 10
         # print('====== reward ======')
         # print('预测误差: ', prediction_error)
         # print('接收数据量: ', received_dataa)
@@ -108,7 +118,8 @@ class Env:
         self.time_slot = args.time_slot                        # 时隙长度(s)
         self.warm_up_vehicles = args.warm_up_vehicles
         self.I2V_channel = I2Vchannel(self.RSU_position, args.RSU_trans_power, args.noise_power)
-        self.orth_pos_list = [3,6,9]            # 车辆与RSU在垂直方向的距离，类似车道宽度
+        self.orth_pos_list = args.orth_pos_list            # 车辆与RSU在垂直方向的距离，类似车道宽度
+        self.args = args
 
         # 车辆参数
         self.min_velocity = args.v_min  # 最小车速(m/s)
@@ -174,12 +185,12 @@ class Env:
         现在场景有效区域为[0, monitor_range]，车辆从0开始向monitor_range移动
         """
         # 生成分布在监控区域内的车辆
-        num_initial_vehicles = random.randint(8, 12)
+        num_initial_vehicles = random.randint(24, 27)
 
         # 在监控区域内均匀分布车辆
         for i in range(num_initial_vehicles):
             # 计算初始位置 - 在监控区域内均匀分布
-            position_factor = i / num_initial_vehicles  # 0到1之间的值
+            position_factor = 1 - i / num_initial_vehicles          # 0到1之间的值
             base_position = self.monitor_range * position_factor
 
             # 添加一些随机波动，避免完全均匀
@@ -220,8 +231,8 @@ class Env:
         self.vehicles[vehicle_id].code_rate = self.data_rates[data_rate_index]
         self.vehicles[vehicle_id].anytime_alpha = self.alpha_set[data_rate_index]
         # 已接收数据量：随机系数 * 进入以来的时隙数 * 一帧实际传输大小
-        self.vehicles[vehicle_id].received_data = random.uniform(0.6, 1) * int(position / velocity / self.time_slot) * self.frame_size * 1024 * 8 * self.vehicles[vehicle_id].code_rate
-        self.vehicles[vehicle_id].bits_in_queue = random.randrange(0, int(self.frame_size * 1024 * 8 * self.vehicles[vehicle_id].code_rate * 1.2))
+        self.vehicles[vehicle_id].received_data = random.uniform(0.6, 1) * math.ceil(position / velocity / self.time_slot) * self.frame_size * 1024 * 8 * self.vehicles[vehicle_id].code_rate
+        self.vehicles[vehicle_id].bits_in_queue = math.ceil(position / velocity / self.time_slot) * self.frame_size * 1024 * 8 * self.vehicles[vehicle_id].code_rate - self.vehicles[vehicle_id].received_data
         self.vehicles[vehicle_id].update_trans_rate(self.time_slot, self.bandwidth_history[-1])
         self.vehicles[vehicle_id].is_computed = random.uniform(0, 1) <= (position/self.monitor_range)
 
@@ -279,10 +290,12 @@ class Env:
         self.active_vehicles.append(vehicle_id)
 
 
-    def select_data_rate(self, vehicle_id, selected_method=2):
+    def select_data_rate(self, vehicle_id, selected_method=1):
         """ 为某车辆选择传输码率 """
+        # print('\n vehicle_id:', vehicle_id)
         vehicle = self.vehicles[vehicle_id]
         pre_timeslots = int(vehicle.time_remained / self.time_slot)       # 剩余时隙数
+        # print('slot_remained: ', pre_timeslots)
         pre_rates = [vehicle.trans_rate]                            # 记录未来每个时隙的预测传输速率(bps)，初始值为当前时隙速率，可观测
 
         # 使用调和平均值，依次预测未来各时隙的带宽，并计算各时隙的速率
@@ -300,9 +313,15 @@ class Env:
 
         # 估计平均传输速率
         avg_pre_rate = sum(pre_rates) / len(pre_rates)
+        # print('avg_pre_rate: ', avg_pre_rate)
 
         # 计算紧迫性权重
-        urgency_weight = np.exp(-self.a * vehicle.time_remained)
+        # 车辆在初次出现即选择码率，因此其观测到的剩余时间范围为[(monitor_range-variance)/v_max, monitor_range/v_min]。根据此范围首先放缩为[0,1]，然后*2，与指数系数a=2适配
+        time_remained = ((vehicle.time_remained - (self.args.monitor_range - self.position_variance) / self.args.v_max) /
+                         (self.args.monitor_range / self.args.v_min - (self.args.monitor_range - self.position_variance) / self.args.v_max) * 2)
+        urgency_weight = np.exp(-self.a * time_remained)
+        # print('time_remained: ', vehicle.time_remained)
+        # print('time_remained_scaled: ', time_remained)
         # print('紧迫性权重u: ', urgency_weight)
 
 
@@ -310,11 +329,11 @@ class Env:
         if selected_method == 1:
             l_tt = avg_pre_rate * self.time_slot / (self.frame_size * 1024 * 8)
             index = 0
-            min_diff = abs(self.data_rates[0] - urgency_weight * l_tt)
-            for i in range(len(self.data_rates)):
-                diff = abs(self.data_rates[i] - urgency_weight * l_tt)
-                if diff < min_diff:
-                    min_diff = diff
+            min_diffe = abs(self.data_rates[0] - 1.2 * urgency_weight * l_tt)
+            for i in range(1, len(self.data_rates)):
+                diff = abs(self.data_rates[i] - 1.2 * urgency_weight * l_tt)
+                if diff < min_diffe:
+                    min_diffe = diff
                     index = i
 
         #### 方法 2 ####
@@ -326,6 +345,8 @@ class Env:
             # print('码率倾向因子m: ', m)
             index = round(m * (len(self.data_rates) - 1))               # 将码率倾向因子映射到具体码率的序号
 
+        # print('选择的码率序号: ', index)
+        ttt = 1
         return index
 
 
@@ -383,13 +404,20 @@ class Env:
         """ 获取指定车辆当前时隙的状态 """
         vehicle = self.vehicles[vehicle_id]
 
+        # 计算与RSU的空间距离
+        distance = self.I2V_channel.get_distance(vehicle.position, vehicle.position_orth)
         # 计算其他车辆的平均剩余时间（排除预热车辆）
         num_non_cmp_vehicles, avg_other_time = self._calculate_avg_remaining_time(vehicle_id)
 
         return np.array([
-            vehicle.time_remained,      # 剩余时间
-            int( vehicle.received_data / (self.frame_size * 1024 * 8 * vehicle.code_rate) ),      # 已接收帧数
-            vehicle.anytime_alpha,                                                              # 误码率下降速率
+            vehicle.f,                                           # 计算能力
+            vehicle.time_remained,                              # 剩余时间
+            math.floor( vehicle.received_data / (self.frame_size * 1024 * 8 * vehicle.code_rate) ),      # 已接收帧数
+            vehicle.received_data / (self.frame_size * 1024 * 8 * vehicle.code_rate) -
+                            math.floor( vehicle.received_data / (self.frame_size * 1024 * 8 * vehicle.code_rate) ),      # 下一帧的接收比例
+            vehicle.code_rate,                                   # 码率
+            vehicle.anytime_alpha,                              # 误码率下降速率
+            distance,                                            # 与RSU空间距离
             num_non_cmp_vehicles,                              # 场景中其它未计算车辆的数量
             avg_other_time                                     # 其它未计算车辆的平均剩余时间
         ], dtype=np.float32)
